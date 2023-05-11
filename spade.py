@@ -1,3 +1,5 @@
+import base64
+import json
 import os
 import random
 import sys
@@ -25,9 +27,6 @@ download_dir = "/a/b/c"
 
 # Download directory size in GiBs (limits how many deals are processed at once)
 dir_size = 500
-
-# Spade authenticator script (fil-spid.bash) location (must be full path)
-spade_script = "/a/b/c"
 
 # Boost graphql URL
 boost_qgl = 'http://localhost:8080/graphql/query'
@@ -97,30 +96,50 @@ def setup():
             f"Error: Download directory file system does not have enough space to accommodate full download directory")
         sys.exit(1)
 
-    # Check if spade script exists
-    if not os.path.exists(spade_script):
-        print(f"Error: Spade script {spade_script} does not exist")
-        sys.exit(1)
+
+def lotus_apicall(input_data):
+    full_node_api = os.environ.get('FULLNODE_API_INFO')
+    api_token, api_maddr = full_node_api.strip().split(":")
+    ignore, api_nproto, api_host, api_tproto, api_port, api_aproto = api_maddr.split("/")
+
+    if api_nproto == "ip6":
+            api_host = f"[{api_host}]"
+    cmd = ["/usr/bin/curl", "-m5", "-s", f"http://{api_host}:{api_port}/rpc/v0", "-XPOST", f"-HAuthorization: Bearer {api_token}", "-HContent-Type: application/json", "--data", input_data]
+    output = subprocess.run(cmd, capture_output=True, text=True)
+    maybe_err = output.stdout
+    if not maybe_err:
+            raise ValueError(f"Error executing '{input_data}' against API http://{api_host}:{api_port}\n{maybe_err or 'No result from API call'}")
+    data = json.loads(output.stdout)
+    return data
 
 
-def generate_spade_auth(extra=None):
+def gen_auth(extra=None):
+    +    ful_authhdr = "FIL-SPID-V0"
+
+    b64_optional_payload = ""
     if extra:
-        process = subprocess.run(
-            ['bash', spade_script, spid], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, universal_newlines=True, input=extra
-        )
-        return {"Authorization": process.stdout.rstrip()}
-        # auth_token_p = subprocess.Popen(['echo', ' -n', extra], stdout=subprocess.PIPE)
-        # auth_token = subprocess.check_output([spade_script, spid], stdin=auth_token_p.stdout).decode().strip()
-        # return {"Authorization": auth_token}
-    else:
-        auth_token = subprocess.check_output([spade_script, spid]).decode().strip()
-        return {"Authorization": auth_token}
+            b64_optional_payload = base64.b64encode(extra.encode('ascii')).decode('ascii')
+
+    b64_spacepad = "ICAg"
+    fil_chain_head = lotus_apicall(f'{{ "jsonrpc": "2.0", "id": 1, "method": "Filecoin.ChainHead", "params": []}}')['result']['Height']
+    fil_finalized_tipset = lotus_apicall(f'{{ "jsonrpc": "2.0", "id": 1, "method": "Filecoin.ChainGetTipSetByHeight", "params": [ {fil_chain_head - 90}, null ] }}')['result']['Cids']
+    j_fil_finalized_tipset = json.dumps(fil_finalized_tipset)
+    fil_finalized_worker_id = lotus_apicall(f'{{ "jsonrpc": "2.0", "id": 1, "method": "Filecoin.StateMinerInfo", "params": [ "{spid}", {j_fil_finalized_tipset} ] }}')['result']['Worker']
+    fil_current_drand_b64 = lotus_apicall(f'{{ "jsonrpc": "2.0", "id": 1, "method": "Filecoin.BeaconGetEntry", "params": [ {fil_chain_head} ] }}')['result']['Data']
+    fil_authsig = lotus_apicall(f'{{ "jsonrpc": "2.0", "id": 1, "method": "Filecoin.WalletSign", "params": [ "{fil_finalized_worker_id}", "{b64_spacepad}{fil_current_drand_b64}{b64_optional_payload}" ] }}')['result']['Data']
+
+
+    hdr = f"{ful_authhdr} {fil_chain_head};{spid};{fil_authsig}"
+    if extra:
+            hdr += f";{b64_optional_payload}"
+
+    return {"Authorization": hdr}
 
 
 # Generates a list of pending proposals for the miner from Spade API
 # List is then sorted based on time remaining to seal the deal
 def generate_pending_proposals():
-    auth_header = generate_spade_auth()
+    auth_header = gen_auth()
 
     response = requests.get(pending_proposals_url, headers=auth_header)
     pending_proposals = []
@@ -178,7 +197,7 @@ def query_deal_status(deal_uuid, piece_cid):
 def send_deals(c):
     if c <= 0:
         return
-    auth_header = generate_spade_auth()
+    auth_header = gen_auth()
 
     response = requests.get(eligible_proposals_url, headers=auth_header)
     eligible_proposals = []
@@ -195,7 +214,7 @@ def send_deals(c):
                 if i < c:
                     r = p['sample_reserve_cmd']
                     ex = r.split("'")[1]
-                    a = generate_spade_auth(ex)
+                    a = gen_auth(ex)
                     response = requests.post(send_deal_url, headers=a, allow_redirects=True)
                     if response.status_code == 200:
                         i = i + 1
