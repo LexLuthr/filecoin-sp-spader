@@ -2,7 +2,6 @@ import os
 import random
 import sys
 import subprocess
-import json
 import threading
 import time
 import jwt
@@ -10,8 +9,12 @@ import jwt
 import aria2p as aria2p
 import requests
 from shutil import which
-
 # TODO: Test
+
+# User must have the latest version of aria2c installed and binary must be found in $PATH variable
+# User must have the 'fil-spid.bash' auth script available and executable. It can be downloaded with below URL
+# "curl -OL https://raw.githubusercontent.com/ribasushi/bash-fil-spid-v0/5f41eec1a/fil-spid.bash"
+# User also needs to export 'LOTUS_FULLNODE_API' variable to allow the above script to work
 
 # Logging directory full path (must be owned by current user)
 log_directory = "/a/b/c"
@@ -32,10 +35,12 @@ dir_size = 500
 spade_script = "/a/b/c"
 
 # Command used to run the aria2c daemon
-aria2c_daemon = "aira2c --daemon --enable-rpc --rpc-listen-port=6801 --keep-unfinished-download-result"
-aria2c_config = " --save-session=" + log_directory + "/aria2c.session --save-session-interval=2"
+aria2c_daemon = "aria2c --daemon --enable-rpc --rpc-listen-port=6801 --keep-unfinished-download-result"
+aria2c_session_file = log_directory + "/aria2c.session"
+aria2c_session = " --save-session=" + aria2c_session_file + " -i" + aria2c_session_file
+aria2c_config = " --save-session-interval=2 -j 20"
 aria2c_log = " --log=" + log_directory + "/aria2c.log"
-aria2c_cmd = aria2c_daemon + aria2c_config + aria2c_log
+aria2c_cmd = aria2c_daemon + aria2c_session + aria2c_config + aria2c_log
 
 # Spade URLs
 pending_proposals_url = "https://api.spade.storage/sp/pending_proposals"
@@ -66,6 +71,18 @@ class ThreadPool(object):
                 return False
 
 
+# Provides the current size of download directory
+def get_download_dir_size():
+    total_size = 0
+
+    for dirpath, dirnames, filenames in os.walk(download_dir):
+        for filename in filenames:
+            file_path = os.path.join(dirpath, filename)
+            total_size += os.path.getsize(file_path)
+
+    return total_size
+
+
 def setup():
     # Check if aria2c exists
     if which("aria2c") is None:
@@ -82,9 +99,10 @@ def setup():
         print(f"Error: Download directory {download_dir} does not exist")
         sys.exit(1)
 
-    # Check if download directory has enough free space TODO: Better calculation here, take occupied space in account
-    if os.statvfs(download_dir).f_frsize * os.statvfs(download_dir).f_bavail < dir_size * 1024 * 1024 * 1024:
-        print(f"Error: Download directory {download_dir} does not have enough space")
+    # Check if download directory has enough free space
+    fs_size = os.statvfs(download_dir).f_frsize * os.statvfs(download_dir).f_bavail
+    if fs_size < ((dir_size * 1024 * 1024 * 1024) - get_download_dir_size()):
+        print(f"Error: Download directory file system does not have enough space to accommodate full download directory")
         sys.exit(1)
 
     # Check if spade script exists
@@ -160,18 +178,6 @@ def query_deal_status(deal_uuid, piece_cid):
         return False
 
 
-# Provides the current size of download directory
-def get_download_dir_size():
-    total_size = 0
-
-    for dirpath, dirnames, filenames in os.walk(download_dir):
-        for filename in filenames:
-            file_path = os.path.join(dirpath, filename)
-            total_size += os.path.getsize(file_path)
-
-    return total_size
-
-
 # Reserves the specified number of deal in spade
 def send_deals(c):
     auth_header = generate_spade_auth()
@@ -208,11 +214,30 @@ def send_deals(c):
         print("ERROR: Eligible proposals request failed with status code:", response.status_code)
 
 
+def find_gid(file_path, uri):
+    with open(file_path, 'r') as file:
+        lines = file.readlines()
+        for i, line in enumerate(lines):
+            if uri in line:
+                for next_line in lines[i+1:]:
+                    if 'gid' in next_line:
+                        return next_line.strip()
+                break
+    return None
+
+
+# Processes a deal proposal from spade:
+# 1. Check if download already in progress
+# 2. Check if we have enough space in download directory
+# 3. Queue the download and wait for it finish or error out
+# 4. Call Boost API to import the data for deal
 def process_proposal(p, t):
+    piece_size = p['piece_size']
+    current_size = get_download_dir_size()
+    if (current_size + piece_size) > dir_size * 1024 * 1024 * 1024:
+        return
     s = query_deal_status(p['deal_proposal_id'], p['piece_cid'])
     if s:
-        # TODO: Check space
-        # TODO: Check if already being downloaded
         client = aria2p.API(
             aria2p.Client(
                 host="http://localhost",
@@ -220,8 +245,16 @@ def process_proposal(p, t):
                 secret=t
             )
         )
+        gid = ""
+        for i in s['data_sources']:
+            gid_str = find_gid(aria2c_session_file, i)
+            if gid_str is not None:
+                gid = gid_str.split('=')[1]
+                break
 
-        gid = client.add_uris(s['data_sources'])
+        if gid == "":
+            gid = client.add_uris(s['data_sources'])
+
         status = client.get_download(gid)
         failed = False
         while not status.is_complete:
@@ -239,12 +272,13 @@ def process_proposal(p, t):
         print(f"ERROR: not processing deal: {p['deal_proposal_id']}")
 
 
+# Monitors the deal threads and cleans up the finished threads
 def thread_monitor(t, i, tpool):
     t.join()
     tpool.removethread(i)
 
 
-# Start execution
+# Starts execution loop
 def start():
     try:
         # Start logging
@@ -325,9 +359,11 @@ def start():
                 retry = retry + 1
 
         if paused:
+            time.sleep(3)  # To allow session to be saved
             print("Stopped aria2c daemon gracefully")
         else:
             client.pause_all(True)
+            time.sleep(3)  # To allow session to be saved
             print("Stopped aria2c daemon forcefully")
 
         print("################ Stopping #####################")
