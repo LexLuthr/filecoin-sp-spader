@@ -79,11 +79,6 @@ def setup():
         print(f"Error: Utility aria2c does not exist")
         sys.exit(1)
 
-    # Check if log directory exists
-    if not os.path.exists(download_dir):
-        print(f"Error: Download directory {download_dir} does not exist")
-        sys.exit(1)
-
     # Check if download directory exists
     if not os.path.exists(download_dir):
         print(f"Error: Download directory {download_dir} does not exist")
