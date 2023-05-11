@@ -303,7 +303,7 @@ def download_monitor(g, pid):
 def start():
     try:
         # Start logging
-        log_filename = download_dir + "/spade-deal-downloader.log"
+        log_filename = download_dir + "/spader.log"
         f = open(log_filename, 'a')
         f.write("############################################################\n")
         f.write("################ Starting a new process #####################\n")
@@ -313,14 +313,6 @@ def start():
         sf.close()
 
         pid = os.getpid()
-        # Generate a random number for the JWT payload
-        payload = {"random_number": random.randint(1, 100)}
-
-        # Define a secret key for the JWT
-        secret_key = "mysecretkey"
-
-        # Create the JWT using the payload and secret key
-        token = jwt.encode(payload, secret_key, algorithm="HS256")
         aria2c_final_cmd = aria2c_cmd + " --stop-with-process=" + str(pid)
         try:
             output = subprocess.check_output(aria2c_final_cmd, shell=True, stderr=subprocess.STDOUT)
