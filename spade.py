@@ -105,9 +105,13 @@ def setup():
 
 def generate_spade_auth(extra=None):
     if extra:
-        auth_token_p = subprocess.Popen(['echo', ' -n', extra], stdout=subprocess.PIPE)
-        auth_token = subprocess.check_output([spade_script, spid], stdin=auth_token_p.stdout).decode().strip()
-        return {"Authorization": auth_token}
+        process = subprocess.run(
+            ['bash', spade_script, spid], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, universal_newlines=True, input=extra
+        )
+        return {"Authorization": process.stdout.rstrip()}
+        # auth_token_p = subprocess.Popen(['echo', ' -n', extra], stdout=subprocess.PIPE)
+        # auth_token = subprocess.check_output([spade_script, spid], stdin=auth_token_p.stdout).decode().strip()
+        # return {"Authorization": auth_token}
     else:
         auth_token = subprocess.check_output([spade_script, spid]).decode().strip()
         return {"Authorization": auth_token}
@@ -188,14 +192,13 @@ def send_deals(c):
         if len(eligible_proposals_url) > 0:
             i = 0
             for p in eligible_proposals:
-                if i >= c:
-                    break
-                r = p['sample_reserve_cmd']
-                ex = r.split("'")[1]
-                a = generate_spade_auth(ex)
-                response = requests.post(send_deal_url, json={}, headers=a)
-                if response.status_code == 200:
-                    i = i + 1
+                if i < c:
+                    r = p['sample_reserve_cmd']
+                    ex = r.split("'")[1]
+                    a = generate_spade_auth(ex)
+                    response = requests.post(send_deal_url, headers=a, allow_redirects=True)
+                    if response.status_code == 200:
+                        i = i + 1
 
             if i < c:
                 print(f"WARN: Only {i} eligible proposals found out of requested {c}")
