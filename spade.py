@@ -1,9 +1,7 @@
-import multiprocessing
 import os
 import random
 import sys
 import subprocess
-import threading
 import time
 import jwt
 
@@ -30,6 +28,9 @@ dir_size = 500
 
 # Spade authenticator script (fil-spid.bash) location (must be full path)
 spade_script = "/a/b/c"
+
+# Boost graphql URL
+boost_qgl = 'http://localhost:8080/graphql/query'
 
 # Command used to run the aria2c daemon
 aria2c_daemon = "aria2c --daemon --enable-rpc --rpc-listen-port=6801 --keep-unfinished-download-result"
@@ -148,7 +149,7 @@ def query_deal_status(deal_uuid, piece_cid):
     headers = {'Content-Type': 'application/json'}
 
     # Send the POST request to the GraphQL endpoint
-    response = requests.post('http://localhost:8080/graphql/query', json=payload, headers=headers)
+    response = requests.post(boost_qgl, json=payload, headers=headers)
 
     # Check for HTTP errors
     response.raise_for_status()
@@ -231,7 +232,7 @@ def find_completed(file_path, i):
 # 1. Check if download already in progress
 # 2. Check if we have enough space in download directory
 # 3. Queue the download and wait for it finish or error out
-# 4. Call Boost API to import the data for deal
+# 4. Call Boost API to import the data for deal TODO
 def process_proposal(p):
     print(f"INFO: Processing deal {p['deal_proposal_id']}")
     piece_size = p['piece_size']
