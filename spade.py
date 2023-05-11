@@ -20,7 +20,7 @@ from shutil import which
 log_directory = "/a/b/c"
 
 # Number of deals/proposals to be handled simultaneously
-max_concurrent_proposals = 5
+max_concurrent_proposals = 10
 
 # Miner ID
 spid = "fXXXX"
@@ -315,10 +315,9 @@ def start():
             print(output.decode())
 
         tpool = ThreadPool()
-        processing_proposals = []
 
         while True:
-            if len(processing_proposals) < max_concurrent_proposals:
+            if len(tpool.process) < max_concurrent_proposals:
                 sorted_pending_proposals = generate_pending_proposals()
                 if len(sorted_pending_proposals) > 0:
                     # Start processing the pending proposals
@@ -326,14 +325,12 @@ def start():
                         dealid = proposal['deal_proposal_id']
                         if not tpool.checkthread(dealid):
                             th = threading.Thread(target=process_proposal(proposal, token))
-                            pr = {"thread": th, "id": dealid}
-                            tpool.threads.append(pr)
+                            tpool.process[dealid] = th
                             th.start()
-                            processing_proposals.append(dealid)
                             thread_monitor(th, dealid, tpool)
                     time.sleep(60)
                 else:
-                    send_deals(max_concurrent_proposals - len(processing_proposals))
+                    send_deals(max_concurrent_proposals - len(tpool.process))
                     time.sleep(300)
             else:
                 time.sleep(60)
