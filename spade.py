@@ -45,9 +45,11 @@ pending_proposals_url = "https://api.spade.storage/sp/pending_proposals"
 eligible_proposals_url = "https://api.spade.storage/sp/eligible_pieces"
 send_deal_url = "https://api.spade.storage/sp/invoke"
 
-# Complete download list file
-complete_download_list_file = download_dir + "/completed"
+# Complete download list
+complete_download_list = download_dir + "/completed"
 
+# Failed download list
+failed_download_list = download_dir + "/failed"
 
 # Creates an aria2p client
 def aria_client():
@@ -123,7 +125,7 @@ def generate_pending_proposals():
         data = response.json()
         print("INFO: Generating a list of pending proposals")
         for item in data['response']['pending_proposals']:
-            if not find_completed(complete_download_list_file, item['deal_proposal_id']):
+            if not find_completed(complete_download_list, item['deal_proposal_id']):
                 pending_proposals.append(item)
 
         if len(pending_proposals) > 0:
@@ -220,11 +222,12 @@ def find_gid(file_path, uri):
 
 
 def find_completed(file_path, i):
-    with open(file_path, 'r') as file:
-        lines = file.readlines()
-        for line in lines:
-            if i in line:
-                return True
+    if os.path.exists(file_path):
+        with open(file_path, 'r') as file:
+            lines = file.readlines()
+            for line in lines:
+                if i in line:
+                    return True
     return False
 
 
@@ -261,16 +264,17 @@ def download_monitor(g, pid):
     status = aria_client().client.tell_status(g)
     print(status)
     if status['status'] != 'complete' and 'errorMessage' not in status:
-        return True
+        return True, False, ""
     if status['status'] != 'complete' and 'errorCode' in status:
         if status['errorCode'] == str(13):
             print(f"INFO: Downloads complete for deal id: {pid}")
+            return False, False, status['files'][0]['path']
         else:
             print(f"ERROR: Downloads failed for deal id: {pid}: {status['errorMessage']}")
-        return False
+            return False, True, status['files'][0]['path']
     if status['status'] == 'complete' and 'errorMessage' in status:
         print(f"ERROR: Downloads failed for deal id: {pid}: {status['errorMessage']}")
-        return False
+        return False, True, status['files'][0]['path']
 
 
 # Starts execution loop
@@ -316,18 +320,24 @@ def start():
         while True:
             if len(pool) > 0:
                 for key in pool.keys():
-                    s = download_monitor(pool[key], key)
+                    s, fail, path = download_monitor(pool[key], key)
                     f.flush()
                     if not s:
-                        completed[key] = pool.get(key)
+                        completed[key] = pool[key]
+                        if fail:
+                            complete = open(failed_download_list, 'a')
+                            complete.write(f"{key} {path}\n")
+                            complete.flush()
+                            complete.close()
+                        if not fail and not find_completed(complete_download_list, key):
+                            complete = open(complete_download_list, 'a')
+                            complete.write(f"{key} {path}\n")
+                            complete.flush()
+                            complete.close()
 
                 if len(completed) > 0:
                     for key in completed:
-                        if not find_completed(complete_download_list_file, key):
-                            complete = open(complete_download_list_file, 'a')
-                            complete.write(f"{key}\n")
-                            complete.flush()
-                            pool.pop(key)
+                        pool.pop(key)
 
             if len(pool) < max_concurrent_proposals:
                 sorted_pending_proposals = generate_pending_proposals()
