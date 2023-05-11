@@ -122,7 +122,7 @@ def gen_auth(extra=None):
 
     b64_spacepad = "ICAg"
     fil_chain_head = lotus_apicall(f'{{ "jsonrpc": "2.0", "id": 1, "method": "Filecoin.ChainHead", "params": []}}')['result']['Height']
-    fil_finalized_tipset = lotus_apicall(f'{{ "jsonrpc": "2.0", "id": 1, "method": "Filecoin.ChainGetTipSetByHeight", "params": [ {fil_chain_head - 90}, null ] }}')['result']['Cids']
+    fil_finalized_tipset = lotus_apicall(f'{{ "jsonrpc": "2.0", "id": 1, "method": "Filecoin.ChainGetTipSetByHeight", "params": [ {fil_chain_head - 900}, null ] }}')['result']['Cids']
     j_fil_finalized_tipset = json.dumps(fil_finalized_tipset)
     fil_finalized_worker_id = lotus_apicall(f'{{ "jsonrpc": "2.0", "id": 1, "method": "Filecoin.StateMinerInfo", "params": [ "{spid}", {j_fil_finalized_tipset} ] }}')['result']['Worker']
     fil_current_drand_b64 = lotus_apicall(f'{{ "jsonrpc": "2.0", "id": 1, "method": "Filecoin.BeaconGetEntry", "params": [ {fil_chain_head} ] }}')['result']['Data']
