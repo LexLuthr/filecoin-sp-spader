@@ -1,3 +1,4 @@
+import multiprocessing
 import os
 import random
 import sys
@@ -9,15 +10,11 @@ import jwt
 import aria2p as aria2p
 import requests
 from shutil import which
-# TODO: Test
 
 # User must have the latest version of aria2c installed and binary must be found in $PATH variable
 # User must have the 'fil-spid.bash' auth script available and executable. It can be downloaded with below URL
 # "curl -OL https://raw.githubusercontent.com/ribasushi/bash-fil-spid-v0/5f41eec1a/fil-spid.bash"
 # User also needs to export 'LOTUS_FULLNODE_API' variable to allow the above script to work
-
-# Logging directory full path (must be owned by current user)
-log_directory = "/a/b/c"
 
 # Number of deals/proposals to be handled simultaneously
 max_concurrent_proposals = 10
@@ -36,10 +33,10 @@ spade_script = "/a/b/c"
 
 # Command used to run the aria2c daemon
 aria2c_daemon = "aria2c --daemon --enable-rpc --rpc-listen-port=6801 --keep-unfinished-download-result"
-aria2c_session_file = log_directory + "/aria2c.session"
+aria2c_session_file = download_dir + "/aria2c.session"
 aria2c_session = " --save-session=" + aria2c_session_file + " -i" + aria2c_session_file
-aria2c_config = " --save-session-interval=2 -j 20"
-aria2c_log = " --log=" + log_directory + "/aria2c.log"
+aria2c_config = " --auto-file-renaming=false --save-session-interval=2 -j 20 -d" + download_dir + "/download"
+aria2c_log = " --log=" + download_dir + "/aria2c.log"
 aria2c_cmd = aria2c_daemon + aria2c_session + aria2c_config + aria2c_log
 
 # Spade URLs
@@ -47,28 +44,19 @@ pending_proposals_url = "https://api.spade.storage/sp/pending_proposals"
 eligible_proposals_url = "https://api.spade.storage/sp/eligible_pieces"
 send_deal_url = "https://api.spade.storage/sp/invoke"
 
+# Complete download list file
+complete_download_list_file = download_dir + "/completed"
 
-class ThreadPool(object):
-    def __init__(self):
-        super(ThreadPool, self).__init__()
-        self.process = {}
-        self.lock = threading.Lock()
 
-    def addthread(self, p):
-        with self.lock:
-            self.process[p.id] = p.thread
-
-    def removethread(self, i):
-        with self.lock:
-            self.process.pop(i)
-
-    def checkthread(self, i):
-        with self.lock:
-            keys = self.process.keys()
-            if i in keys:
-                return True
-            else:
-                return False
+# Creates an aria2p client
+def aria_client():
+    return aria2p.API(
+        aria2p.Client(
+            host="http://localhost",
+            port=6801,
+            secret=""
+        )
+    )
 
 
 # Provides the current size of download directory
@@ -90,8 +78,8 @@ def setup():
         sys.exit(1)
 
     # Check if log directory exists
-    if not os.path.exists(log_directory):
-        print(f"Error: Download directory {log_directory} does not exist")
+    if not os.path.exists(download_dir):
+        print(f"Error: Download directory {download_dir} does not exist")
         sys.exit(1)
 
     # Check if download directory exists
@@ -102,7 +90,8 @@ def setup():
     # Check if download directory has enough free space
     fs_size = os.statvfs(download_dir).f_frsize * os.statvfs(download_dir).f_bavail
     if fs_size < ((dir_size * 1024 * 1024 * 1024) - get_download_dir_size()):
-        print(f"Error: Download directory file system does not have enough space to accommodate full download directory")
+        print(
+            f"Error: Download directory file system does not have enough space to accommodate full download directory")
         sys.exit(1)
 
     # Check if spade script exists
@@ -113,8 +102,8 @@ def setup():
 
 def generate_spade_auth(extra=None):
     if extra:
-        command = extra + " | " + spade_script + " " + spid
-        auth_token = subprocess.check_output([command]).decode().strip()
+        auth_token_p = subprocess.Popen(['echo', ' -n', extra], stdout=subprocess.PIPE)
+        auth_token = subprocess.check_output([spade_script, spid], stdin=auth_token_p.stdout).decode().strip()
         return {"Authorization": auth_token}
     else:
         auth_token = subprocess.check_output([spade_script, spid]).decode().strip()
@@ -131,10 +120,10 @@ def generate_pending_proposals():
 
     if response.status_code == 200:
         data = response.json()
-        print(data)
         print("INFO: Generating a list of pending proposals")
         for item in data['response']['pending_proposals']:
-            pending_proposals.append(item)
+            if not find_completed(complete_download_list_file, item['deal_proposal_id']):
+                pending_proposals.append(item)
 
         if len(pending_proposals) > 0:
             # Sort and return the pending proposal based on remaining time
@@ -180,6 +169,8 @@ def query_deal_status(deal_uuid, piece_cid):
 
 # Reserves the specified number of deal in spade
 def send_deals(c):
+    if c <= 0:
+        return
     auth_header = generate_spade_auth()
 
     response = requests.get(eligible_proposals_url, headers=auth_header)
@@ -187,7 +178,6 @@ def send_deals(c):
 
     if response.status_code == 200:
         data = response.json()
-        print(data)
         print("INFO: Generating a list of eligible proposals")
         for item in data['response']:
             eligible_proposals.append(item)
@@ -195,19 +185,21 @@ def send_deals(c):
         if len(eligible_proposals_url) > 0:
             i = 0
             for p in eligible_proposals:
-                if i < c:
-                    r = p['sample_reserve_cmd']
-                    ex = r.split('( ', 2)[1].split(' | ', 3)[0]
-                    a = generate_spade_auth(ex)
-                    res = response = requests.post(send_deal_url, json={}, headers=a)
-                    if response.status_code == 200:
-                        i = i + 1
-                    else:
-                        if eligible_proposals(len(eligible_proposals)-1) == p:
-                            print(f"WARN: Only {i} eligible proposals found out of requested {c}")
-                else:
-                    print(f"INFO: {i} deals sent")
+                if i >= c:
                     break
+                r = p['sample_reserve_cmd']
+                ex = r.split("'")[1]
+                a = generate_spade_auth(ex)
+                response = requests.post(send_deal_url, json={}, headers=a)
+                if response.status_code == 200:
+                    i = i + 1
+
+            if i < c:
+                print(f"WARN: Only {i} eligible proposals found out of requested {c}")
+            else:
+                print(f"INFO: {i} deals sent")
+
+            time.sleep(300)
         else:
             print("WARN: No eligible proposals found")
     else:
@@ -219,11 +211,20 @@ def find_gid(file_path, uri):
         lines = file.readlines()
         for i, line in enumerate(lines):
             if uri in line:
-                for next_line in lines[i+1:]:
+                for next_line in lines[i + 1:]:
                     if 'gid' in next_line:
                         return next_line.strip()
                 break
     return None
+
+
+def find_completed(file_path, i):
+    with open(file_path, 'r') as file:
+        lines = file.readlines()
+        for line in lines:
+            if i in line:
+                return True
+    return False
 
 
 # Processes a deal proposal from spade:
@@ -231,70 +232,58 @@ def find_gid(file_path, uri):
 # 2. Check if we have enough space in download directory
 # 3. Queue the download and wait for it finish or error out
 # 4. Call Boost API to import the data for deal
-def process_proposal(p, t):
+def process_proposal(p):
+    print(f"INFO: Processing deal {p['deal_proposal_id']}")
     piece_size = p['piece_size']
-    current_size = get_download_dir_size()
-    if (current_size + piece_size) > dir_size * 1024 * 1024 * 1024:
-        return
     s = query_deal_status(p['deal_proposal_id'], p['piece_cid'])
     if s:
-        client = aria2p.API(
-            aria2p.Client(
-                host="http://localhost",
-                port=6801,
-                secret=t
-            )
-        )
         gid = ""
-        for i in s['data_sources']:
+        for i in p['data_sources']:
             gid_str = find_gid(aria2c_session_file, i)
             if gid_str is not None:
                 gid = gid_str.split('=')[1]
                 break
 
         if gid == "":
-            gid = client.add_uris(s['data_sources'])
-
-        status = client.get_download(gid)
-        failed = False
-        while not status.is_complete:
-            if status.error_message != "":
-                failed = True
-                break
-            else:
-                status = client.get_download(gid)
-        if failed:
-            print(f"ERROR: Downloads failed for deal id: {p['deal_proposal_id']}: {status.error_message}")
-        else:
-            print(f"INFO: Downloads complete for deal id: {p['deal_proposal_id']}")
-            # TODO: Add boost import-data
+            current_size = get_download_dir_size()
+            if (current_size + piece_size) > dir_size * 1024 * 1024 * 1024:
+                print(f"INFO: Not enough space for deal id: {p['deal_proposal_id']}")
+                return False, gid
+            gid = aria_client().client.add_uri(p['data_sources'])
+        return True, gid
     else:
-        print(f"ERROR: not processing deal: {p['deal_proposal_id']}")
+        return False, ""
 
 
 # Monitors the deal threads and cleans up the finished threads
-def thread_monitor(t, i, tpool):
-    t.join()
-    tpool.removethread(i)
+def download_monitor(g, pid):
+    status = aria_client().client.tell_status(g)
+    print(status)
+    if status['status'] != 'complete' and 'errorMessage' not in status:
+        return True
+    if status['status'] != 'complete' and 'errorCode' in status:
+        if status['errorCode'] == str(13):
+            print(f"INFO: Downloads complete for deal id: {pid}")
+        else:
+            print(f"ERROR: Downloads failed for deal id: {pid}: {status['errorMessage']}")
+        return False
+    if status['status'] == 'complete' and 'errorMessage' in status:
+        print(f"ERROR: Downloads failed for deal id: {pid}: {status['errorMessage']}")
+        return False
 
 
 # Starts execution loop
 def start():
     try:
         # Start logging
-        log_filename = log_directory + "/spade-deal-downloader.log"
-        try:
-            # Try to open the file for writing
-            with open(log_filename, 'x') as f:
-                f.write("############################################################\n")
-                f.write("################ Starting a new process #####################\n")
-                sys.stdout = f
-        except FileExistsError:
-            # If the file already exists, open it for writing
-            with open(log_filename, 'a') as f:
-                f.write("############################################################\n")
-                f.write("################ Starting a new process #####################\n")
-                sys.stdout = f
+        log_filename = download_dir + "/spade-deal-downloader.log"
+        f = open(log_filename, 'a')
+        f.write("############################################################\n")
+        f.write("################ Starting a new process #####################\n")
+        sys.stdout = f
+
+        sf = open(aria2c_session_file, 'w')
+        sf.close()
 
         pid = os.getpid()
         # Generate a random number for the JWT payload
@@ -305,7 +294,7 @@ def start():
 
         # Create the JWT using the payload and secret key
         token = jwt.encode(payload, secret_key, algorithm="HS256")
-        aria2c_final_cmd = aria2c_cmd + " --rpc-secret=" + token + " --stop-with-process=" + pid
+        aria2c_final_cmd = aria2c_cmd + " --stop-with-process=" + str(pid)
         try:
             output = subprocess.check_output(aria2c_final_cmd, shell=True, stderr=subprocess.STDOUT)
         except subprocess.CalledProcessError as e:
@@ -314,42 +303,57 @@ def start():
         else:
             print(output.decode())
 
-        tpool = ThreadPool()
+        if not os.path.exists(download_dir + "/download"):
+            os.makedirs(download_dir + "/download")
+            print(f"Directory '{download_dir}'/download created.")
+        else:
+            print(f"Directory '{download_dir}'/download already exists.")
+
+        pool = {}
+        completed = {}
 
         while True:
-            if len(tpool.process) < max_concurrent_proposals:
+            if len(pool) > 0:
+                for key in pool.keys():
+                    s = download_monitor(pool[key], key)
+                    f.flush()
+                    if not s:
+                        completed[key] = pool.get(key)
+
+                if len(completed) > 0:
+                    for key in completed:
+                        if not find_completed(complete_download_list_file, key):
+                            complete = open(complete_download_list_file, 'a')
+                            complete.write(f"{key}\n")
+                            complete.flush()
+                            pool.pop(key)
+
+            if len(pool) < max_concurrent_proposals:
                 sorted_pending_proposals = generate_pending_proposals()
+                # Start processing the pending proposals
                 if len(sorted_pending_proposals) > 0:
-                    # Start processing the pending proposals
                     for proposal in sorted_pending_proposals:
                         dealid = proposal['deal_proposal_id']
-                        if not tpool.checkthread(dealid):
-                            th = threading.Thread(target=process_proposal(proposal, token))
-                            tpool.process[dealid] = th
-                            th.start()
-                            thread_monitor(th, dealid, tpool)
-                    time.sleep(60)
-                else:
-                    send_deals(max_concurrent_proposals - len(tpool.process))
-                    time.sleep(300)
+                        if dealid not in pool and dealid not in completed:
+                            m, did = process_proposal(proposal)
+                            f.flush()
+                            if m:
+                                pool[dealid] = did
+
+                send_deals(max_concurrent_proposals - len(pool))
+                f.flush()
+
             else:
-                time.sleep(60)
+                time.sleep(30)
 
     except KeyboardInterrupt:
         # Pause all downloads. The aria2c daemon will stop automatically once script finishes
-        client = aria2p.API(
-            aria2p.Client(
-                host="http://localhost",
-                port=6801,
-                secret=token
-            )
-        )
         paused = False
         max_retries = 10
         retry = 1
         while not paused and retry <= max_retries:
             time.sleep(retry)
-            paused = client.pause_all()
+            paused = aria_client().pause_all()
             if paused:
                 break
             else:
@@ -359,11 +363,12 @@ def start():
             time.sleep(3)  # To allow session to be saved
             print("Stopped aria2c daemon gracefully")
         else:
-            client.pause_all(True)
+            aria_client().pause_all(True)
             time.sleep(3)  # To allow session to be saved
             print("Stopped aria2c daemon forcefully")
 
         print("################ Stopping #####################")
+        f.close()
 
 
 def main():
