@@ -2,7 +2,7 @@
 Spader is a simply utility to allow Filecoin SPs to manage the offline deal data download. This utility is stateful and offers a resumption on restart.
 
 ### key Features
-1. Does not submit a deal to Boost (can be added as optional later)
+1. Submits the downloaded deal to Boost
 2. Creates a list of completed downloads based on deal UUID. Makes easy to import in Boost 
 3. Uses aria2 for download 
 4. Spawns and control its own aria2 daemon 
@@ -11,14 +11,21 @@ Spader is a simply utility to allow Filecoin SPs to manage the offline deal data
 7. User can define how many deals they want to process in parallel. It will keep working at full capacity till the storage is full
 
 ## Pre-requisites
-User must have aria2 CLI installed on the server where they wish to run **Spader**.
-The aria2p python package needs to be installed
+1. User must have aria2 CLI installed on the server where they wish to run **Spader**.
+2. Install aria2p python package
 
-```shell
-pip install aria2p
-```
+    ```shell
+    pip install aria2p
+    ```
+   
+3. Export `LOTUS_FULLNODE_INFO` and `BOOST_API_INFO` variables
 
-`spid = "fXXXX"` and `download_dir = "/a/b/c"` must be specified in the `spade.py` file before starting the **Spader**.
+    ```shell
+    lotus auth api-info --perm admin
+    boostd auth api-info --perm admin
+    ```
+
+4. Provide values to the empty variables defined in `##### VARIABLES #####` section of `spade.py` file
 
 ## Importing deals
 Once the download is completed, the program will write deal UUID and the corresponding `.car` file name to `<download directory>/completed`

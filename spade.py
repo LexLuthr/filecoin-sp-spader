@@ -1,20 +1,20 @@
 import base64
 import json
 import os
-import random
 import sys
 import subprocess
 import time
-import jwt
 
 import aria2p as aria2p
 import requests
 from shutil import which
 
 # User must have the latest version of aria2c installed and binary must be found in $PATH variable
-# User must have the 'fil-spid.bash' auth script available and executable. It can be downloaded with below URL
-# "curl -OL https://raw.githubusercontent.com/ribasushi/bash-fil-spid-v0/5f41eec1a/fil-spid.bash"
-# User also needs to export 'LOTUS_FULLNODE_API' variable to allow the above script to work
+# User also needs to export 'LOTUS_FULLNODE_API' and `BOOST_API_INFO` variables
+
+
+#################### VARIABLES #######################
+######################################################
 
 # Number of deals/proposals to be handled simultaneously
 max_concurrent_proposals = 10
@@ -31,12 +31,17 @@ dir_size = 500
 # Boost graphql URL
 boost_qgl = 'http://localhost:8080/graphql/query'
 
+
+#################### END OF VARIABLES #######################
+#############################################################
+
+
 # Command used to run the aria2c daemon
 aria2c_daemon = "aria2c --daemon --enable-rpc --rpc-listen-port=6801 --keep-unfinished-download-result"
 aria2c_session_file = download_dir + "/aria2c.session"
 aria2c_session = " --save-session=" + aria2c_session_file + " -i" + aria2c_session_file
 aria2c_config = " --auto-file-renaming=false --save-session-interval=2 -j 20 -d" + download_dir + "/download"
-aria2c_log = " --log=" + download_dir + "/aria2c.log"
+aria2c_log = " --log=" + download_dir + "/aria2c.log --log-level=info"
 aria2c_cmd = aria2c_daemon + aria2c_session + aria2c_config + aria2c_log
 
 # Spade URLs
@@ -109,7 +114,7 @@ def lotus_apicall(input_data):
 
 
 def gen_auth(extra=None):
-    +    ful_authhdr = "FIL-SPID-V0"
+    ful_authhdr = "FIL-SPID-V0"
 
     b64_optional_payload = ""
     if extra:
@@ -280,18 +285,72 @@ def process_proposal(p):
 def download_monitor(g, pid):
     status = aria_client().client.tell_status(g)
     print(status)
-    if status['status'] != 'complete' and 'errorMessage' not in status:
-        return True, False, ""
-    if status['status'] != 'complete' and 'errorCode' in status:
-        if status['errorCode'] == str(13):
-            print(f"INFO: Downloads complete for deal id: {pid}")
-            return False, False, status['files'][0]['path']
-        else:
-            print(f"ERROR: Downloads failed for deal id: {pid}: {status['errorMessage']}")
-            return False, True, status['files'][0]['path']
-    if status['status'] == 'complete' and 'errorMessage' in status:
+    if status['status'] == 'complete' and status['errorMessage'] == '':
+        print(f"INFO: Downloads complete for deal id: {pid}")
+        return False, False, status['files'][0]['path']
+    elif status['status'] == 'error' and (status['errorCode'] == '0' or status['errorCode'] == '13'):
+        print(f"INFO: Downloads complete for deal id: {pid}")
+        return False, False, status['files'][0]['path']
+    elif status['status'] == 'removed':
+        print(f"INFO: Downloads removed for deal id: {pid}")
+        return False, False, status['files'][0]['path']
+    elif status['status'] == 'error' and not (status['errorCode'] == '0' or status['errorCode'] == '13'):
         print(f"ERROR: Downloads failed for deal id: {pid}: {status['errorMessage']}")
         return False, True, status['files'][0]['path']
+    elif status['status'] == 'active' or status['status'] == 'paused' or status['status'] == 'waiting':
+        return True, False, ""
+    else:
+        return True, False, ""
+
+
+def boost_api_call(params):
+    full_node_api = os.environ.get('BOOST_API_INFO')
+    bapi_token, bapi_maddr = full_node_api.strip().split(":")
+    ignore, bapi_nproto, bapi_host, bapi_tproto, bapi_port, bapi_aproto = bapi_maddr.split("/")
+    if bapi_nproto == "ip6":
+        bapi_host = f"[{bapi_host}]"
+
+    bheaders = {"Authorization": f"Bearer {bapi_token}", "content-type": "application/json"}
+    burl = f"http://{bapi_host}:{bapi_port}/rpc/v0"
+
+    res = requests.post(burl, data=json.dumps(params), headers=bheaders)
+    if res.status_code == 200:
+        print(res.json()['result'])
+    else:
+        print(f"Error executing '{params}' against API http://{bapi_host}:{bapi_port}")
+    return
+
+
+# Call Boost API to start deal execution
+def boost_execute():
+    if not os.path.exists(complete_download_list):
+        return
+
+    with open(complete_download_list, 'r') as file:
+        lines = file.readlines()
+        for line in lines:
+            l = line.split()
+            i = l[0]
+            f = l[1]
+            query = 'query { deal(id: "' + i + '" ) { InboundFilePath } }'
+            payload = {'query': query}
+            headers = {'Content-Type': 'application/json'}
+            response = requests.post(boost_qgl, json=payload, headers=headers)
+            response.raise_for_status()
+            out = response.json()
+            if out['data']['deal']['InboundFilePath'] == "":
+                payload = {
+                    "method": "Filecoin.BoostOfflineDealWithData",
+                    "params": [
+                        i,
+                        f,
+                        True,
+                    ],
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                }
+                boost_api_call(payload)
+    return
 
 
 # Starts execution loop
@@ -327,6 +386,9 @@ def start():
         completed = {}
 
         while True:
+            boost_execute()
+            f.flush()
+
             if len(pool) > 0:
                 for key in pool.keys():
                     s, fail, path = download_monitor(pool[key], key)
@@ -346,7 +408,7 @@ def start():
 
                 if len(completed) > 0:
                     for key in completed:
-                        pool.pop(key)
+                        pool.pop(key, None)
 
             if len(pool) < max_concurrent_proposals:
                 sorted_pending_proposals = generate_pending_proposals()
