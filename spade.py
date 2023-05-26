@@ -37,7 +37,7 @@ boost_qgl = 'http://localhost:8080/graphql/query'
 
 
 # Command used to run the aria2c daemon
-aria2c_daemon = "aria2c --daemon --enable-rpc --rpc-listen-port=6801 --keep-unfinished-download-result"
+aria2c_daemon = "aria2c --daemon --enable-rpc --rpc-listen-port=6801 --keep-unfinished-download-result -s 16 -x 16"
 aria2c_session_file = download_dir + "/aria2c.session"
 aria2c_session = " --save-session=" + aria2c_session_file + " -i" + aria2c_session_file
 aria2c_config = " --auto-file-renaming=false --save-session-interval=2 -j 20 -d" + download_dir + "/download"
@@ -257,7 +257,6 @@ def find_completed(file_path, i):
 # 1. Check if download already in progress
 # 2. Check if we have enough space in download directory
 # 3. Queue the download and wait for it finish or error out
-# 4. Call Boost API to import the data for deal TODO
 def process_proposal(p):
     print(f"INFO: Processing deal {p['deal_proposal_id']}")
     piece_size = p['piece_size']
@@ -274,11 +273,11 @@ def process_proposal(p):
             current_size = get_download_dir_size()
             if (current_size + piece_size) > dir_size * 1024 * 1024 * 1024:
                 print(f"INFO: Not enough space for deal id: {p['deal_proposal_id']}")
-                return False, gid
+                return False, "", True
             gid = aria_client().client.add_uri(p['data_sources'])
-        return True, gid
+        return True, gid, False
     else:
-        return False, ""
+        return False, "", False
 
 
 # Monitors the deal threads and cleans up the finished threads
@@ -411,18 +410,21 @@ def start():
                         pool.pop(key, None)
 
             if len(pool) < max_concurrent_proposals:
+                process_next_time = 0
                 sorted_pending_proposals = generate_pending_proposals()
                 # Start processing the pending proposals
                 if len(sorted_pending_proposals) > 0:
                     for proposal in sorted_pending_proposals:
                         dealid = proposal['deal_proposal_id']
                         if dealid not in pool and dealid not in completed:
-                            m, did = process_proposal(proposal)
+                            m, did, lack_of_space = process_proposal(proposal)
                             f.flush()
                             if m:
                                 pool[dealid] = did
+                            elif lack_of_space:
+                                process_next_time += 1
 
-                send_deals(max_concurrent_proposals - len(pool))
+                send_deals(max_concurrent_proposals - len(pool) - process_next_time)
                 f.flush()
 
             else:
