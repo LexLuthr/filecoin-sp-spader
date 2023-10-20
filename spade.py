@@ -33,6 +33,9 @@ dir_size = 500
 boost_qgl = 'http://localhost:8080/graphql/query'
 
 
+# If True, then utility will import max_concurrent_proposals per hour
+max_concurrent_proposals_per_hour = False
+
 #################### END OF VARIABLES #######################
 #############################################################
 
@@ -323,8 +326,9 @@ def boost_api_call(params):
 
 # Call Boost API to start deal execution
 def boost_execute():
+    executed = 0
     if not os.path.exists(complete_download_list):
-        return
+        return executed
 
     with open(complete_download_list, 'r') as file:
         lines = file.readlines()
@@ -350,7 +354,8 @@ def boost_execute():
                     "id": 1,
                 }
                 boost_api_call(payload)
-    return
+                executed += 1
+    return executed
 
 
 # Starts execution loop
@@ -385,11 +390,22 @@ def start():
             print(f"Directory '{download_dir}'/download already exists.")
 
         pool = {}
-        completed = {}
+        total_executed_deals = 0
 
         while True:
-            boost_execute()
-            f.flush()
+            completed = {}
+
+            if max_concurrent_proposals_per_hour:
+                if total_executed_deals < max_concurrent_proposals:
+                    total_executed_deals += boost_execute()
+                    f.flush()
+                else:
+                    total_executed_deals = 0
+                    print("INFO: Sleeping for 1 hour")
+                    time.sleep(3600)
+            else:
+                boost_execute()
+                f.flush()
 
             if len(pool) > 0:
                 for key in pool.keys():
@@ -419,17 +435,20 @@ def start():
                 if len(sorted_pending_proposals) > 0:
                     for proposal in sorted_pending_proposals:
                         dealid = proposal['deal_proposal_id']
-                        if dealid not in pool and dealid not in completed:
-                            m, did, lack_of_space = process_proposal(proposal)
-                            f.flush()
-                            if m:
-                                pool[dealid] = did
-                            elif lack_of_space:
+                        if dealid not in pool and find_completed(complete_download_list, dealid) and find_completed(failed_download_list, dealid):
+                            if len(pool) < max_concurrent_proposals:
+                                m, did, lack_of_space = process_proposal(proposal)
+                                f.flush()
+                                if m:
+                                    pool[dealid] = did
+                                elif lack_of_space:
+                                    process_next_time += 1
+
+                            else:
                                 process_next_time += 1
 
                 send_deals(max_concurrent_proposals - len(pool) - process_next_time)
                 f.flush()
-
             else:
                 time.sleep(30)
 
