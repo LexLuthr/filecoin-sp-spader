@@ -4,6 +4,7 @@ import os
 import sys
 import subprocess
 import time
+import datetime
 
 import aria2p as aria2p
 import requests
@@ -357,9 +358,11 @@ def start():
     try:
         # Start logging
         log_filename = download_dir + "/spader.log"
+        current_datetime = datetime.datetime.now()
+        formatted_datetime = current_datetime.strftime('%Y-%m-%d %H:%M:%S')
         f = open(log_filename, 'a')
         f.write("############################################################\n")
-        f.write("################ Starting a new process #####################\n")
+        f.write("################ Starting a new process at " + formatted_datetime + " #####################\n")
         sys.stdout = f
 
         sf = open(aria2c_session_file, 'w')
@@ -451,7 +454,10 @@ def start():
             time.sleep(3)  # To allow session to be saved
             print("Stopped aria2c daemon forcefully")
 
-        print("################ Stopping #####################")
+        current_datetime = datetime.datetime.now()
+        formatted_datetime = current_datetime.strftime('%Y-%m-%d %H:%M:%S')
+        print(formatted_datetime)
+        print("################ Stopping at " + formatted_datetime + " ###################")
         f.close()
 
 
